@@ -8,6 +8,25 @@
 <script crossorigin src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
 <script src="https://unpkg.com/@babel/standalone@7.23.5/babel.min.js"></script>
 <script src="https://cdn.tailwindcss.com"></script>
+<script type="module">
+  import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.7.1/firebase-app.js';
+  import { getFirestore, collection, getDocs, doc, setDoc, deleteDoc, onSnapshot } from 'https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore.js';
+
+  const firebaseConfig = {
+    apiKey: "AIzaSyCWB3RtXPejX8WMMu65F_woVffotLiyCPE",
+    authDomain: "nccutheater-ab03c.firebaseapp.com",
+    projectId: "nccutheater-ab03c",
+    storageBucket: "nccutheater-ab03c.firebasestorage.app",
+    messagingSenderId: "194078255051",
+    appId: "1:194078255051:web:92b65aa4515985711df84e"
+  };
+
+  const app = initializeApp(firebaseConfig);
+  const db = getFirestore(app);
+  
+  window.firebaseDB = db;
+  window.firebaseUtils = { collection, getDocs, doc, setDoc, deleteDoc, onSnapshot };
+</script>
 <style>
   body { margin: 0; padding: 0; }
   #root { min-height: 100vh; }
@@ -121,8 +140,10 @@ function TheaterApp() {
   }, []);
 
   useEffect(() => {
-    if (!isLoading && projects.length > 0) {
-      saveProjectsToDB(projects).catch(err => console.error('保存失敗:', err));
+    if (!isLoading && projects.length >= 0) {
+      // 同時保存到本地和 Firebase
+      saveProjectsToDB(projects).catch(err => console.error('本地保存失敗:', err));
+      saveProjectsToFirebase(projects).catch(err => console.error('Firebase 保存失敗:', err));
     }
   }, [projects, isLoading]);
 
@@ -138,6 +159,7 @@ function TheaterApp() {
     const project = projects.find(p => p.id === id);
     if (window.confirm(`確定要刪除專案「${project.name}」嗎？\n刪除後將無法復原。`)) {
       setProjects(projects.filter(p => p.id !== id));
+      deleteProjectFromFirebase(id); // 同時從 Firebase 刪除
       if (currentProjectId === id) {
         setCurrentProjectId(null);
         setCurrentPage('projects');
@@ -354,20 +376,23 @@ function TheaterApp() {
         <div className="max-w-2xl mx-auto">
           <div className="flex items-center justify-between mb-8">
             <h1 className="text-4xl font-bold text-slate-800">傻瓜劇團音效管理系統</h1>
-            <div className="text-xs text-slate-500">📥 離線可用</div>
+            <div className="text-xs text-slate-500 flex items-center gap-2">
+              <span>📥 離線可用</span>
+              <span>☁️ 雲端同步</span>
+            </div>
           </div>
           
-          <div className="bg-white rounded-lg shadow-sm p-6 mb-6">
-            <div className="flex gap-2">
+          <div className="bg-white rounded-lg shadow-sm p-4 md:p-6 mb-6">
+            <div className="flex flex-col sm:flex-row gap-2">
               <input
                 type="text"
                 value={newProjectName}
                 onChange={(e) => setNewProjectName(e.target.value)}
                 placeholder="輸入新專案名稱..."
-                className="flex-1 px-4 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                className="flex-1 px-3 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 text-sm md:text-base"
                 onKeyPress={(e) => e.key === 'Enter' && addProject()}
               />
-              <button onClick={addProject} className="bg-blue-600 text-white px-6 py-2 rounded-lg hover:bg-blue-700 transition">
+              <button onClick={addProject} className="bg-blue-600 text-white px-4 py-2 rounded-lg hover:bg-blue-700 transition text-sm md:text-base whitespace-nowrap">
                 ➕ 新增
               </button>
             </div>
@@ -375,98 +400,98 @@ function TheaterApp() {
 
           <div className="space-y-3">
             {projects.map((p, idx) => (
-              <div key={p.id} className="bg-white rounded-lg shadow-sm p-4 flex items-center justify-between hover:shadow-md transition">
+              <div key={p.id} className="bg-white rounded-lg shadow-sm p-4 hover:shadow-md transition">
                 {editingProjectId === p.id ? (
                   <div className="flex gap-2 flex-1">
                     <input
                       type="text"
                       value={editingProjectName}
                       onChange={(e) => setEditingProjectName(e.target.value)}
-                      className="flex-1 px-3 py-2 border border-blue-400 rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
+                      className="flex-1 px-3 py-2 border border-blue-400 rounded focus:outline-none focus:ring-2 focus:ring-blue-500 text-sm"
                       autoFocus
                       onKeyPress={(e) => e.key === 'Enter' && updateProjectName(p.id, editingProjectName)}
                     />
-                    <button onClick={() => updateProjectName(p.id, editingProjectName)} className="px-4 py-2 bg-green-500 text-white rounded hover:bg-green-600">✓</button>
-                    <button onClick={() => setEditingProjectId(null)} className="px-4 py-2 bg-slate-300 text-slate-700 rounded hover:bg-slate-400">✕</button>
+                    <button onClick={() => updateProjectName(p.id, editingProjectName)} className="px-3 py-2 bg-green-500 text-white rounded hover:bg-green-600 text-sm">✓</button>
+                    <button onClick={() => setEditingProjectId(null)} className="px-3 py-2 bg-slate-300 text-slate-700 rounded hover:bg-slate-400 text-sm">✕</button>
                   </div>
                 ) : (
-                  <div className="flex-1 text-left">
-                    <h3 
-                      className="font-semibold text-slate-800 text-lg hover:text-blue-600 hover:underline cursor-pointer"
-                      onClick={() => {
-                        setEditingProjectId(p.id);
-                        setEditingProjectName(p.name);
-                      }}
-                    >{p.name}</h3>
-                    <p className="text-sm text-slate-500">{p.chapters.length} 幕</p>
-                  </div>
-                )}
-                {editingProjectId !== p.id && (
-                  <div className="flex gap-3">
-                    <button 
-                      onClick={() => { setCurrentProjectId(p.id); setCurrentPage('play'); }} 
-                      className="flex flex-col items-center justify-center p-2 text-green-600 hover:bg-green-50 rounded-lg transition"
-                      title="進入專案"
-                    >
-                      <svg className="w-5 h-5 mb-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z" />
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-                      </svg>
-                      <span className="text-xs">進入專案</span>
-                    </button>
-                    <button 
-                      onClick={() => { setCurrentProjectId(p.id); setCurrentPage('settings'); }} 
-                      className="flex flex-col items-center justify-center p-2 text-slate-600 hover:bg-slate-100 rounded-lg transition"
-                      title="編輯專案"
-                    >
-                      <svg className="w-5 h-5 mb-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
-                      </svg>
-                      <span className="text-xs">編輯專案</span>
-                    </button>
-                    <button 
-                      onClick={() => moveProject(idx, 'up')} 
-                      disabled={idx === 0} 
-                      className="flex flex-col items-center justify-center p-2 text-slate-600 hover:bg-slate-100 disabled:opacity-30 disabled:cursor-not-allowed rounded-lg transition"
-                      title="上移"
-                    >
-                      <svg className="w-5 h-5 mb-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M5 15l7-7 7 7" />
-                      </svg>
-                      <span className="text-xs">上移</span>
-                    </button>
-                    <button 
-                      onClick={() => moveProject(idx, 'down')} 
-                      disabled={idx === projects.length - 1} 
-                      className="flex flex-col items-center justify-center p-2 text-slate-600 hover:bg-slate-100 disabled:opacity-30 disabled:cursor-not-allowed rounded-lg transition"
-                      title="下移"
-                    >
-                      <svg className="w-5 h-5 mb-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M19 9l-7 7-7-7" />
-                      </svg>
-                      <span className="text-xs">下移</span>
-                    </button>
-                    <button 
-                      onClick={() => duplicateProject(p)} 
-                      className="flex flex-col items-center justify-center p-2 text-blue-600 hover:bg-blue-50 rounded-lg transition"
-                      title="複製"
-                    >
-                      <svg className="w-5 h-5 mb-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
-                      </svg>
-                      <span className="text-xs">複製</span>
-                    </button>
-                    <button 
-                      onClick={() => deleteProject(p.id)} 
-                      className="flex flex-col items-center justify-center p-2 text-red-600 hover:bg-red-50 rounded-lg transition"
-                      title="刪除"
-                    >
-                      <svg className="w-5 h-5 mb-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-                      </svg>
-                      <span className="text-xs">刪除</span>
-                    </button>
-                  </div>
+                  <>
+                    <div className="flex-1 mb-3">
+                      <h3 
+                        className="font-semibold text-slate-800 text-base md:text-lg hover:text-blue-600 hover:underline cursor-pointer"
+                        onClick={() => {
+                          setEditingProjectId(p.id);
+                          setEditingProjectName(p.name);
+                        }}
+                      >{p.name}</h3>
+                      <p className="text-xs md:text-sm text-slate-500">{p.chapters.length} 幕</p>
+                    </div>
+                    <div className="grid grid-cols-3 sm:flex sm:flex-wrap gap-2">
+                      <button 
+                        onClick={() => { setCurrentProjectId(p.id); setCurrentPage('play'); }} 
+                        className="flex flex-col items-center justify-center p-2 text-green-600 hover:bg-green-50 rounded-lg transition"
+                        title="進入專案"
+                      >
+                        <svg className="w-4 h-4 md:w-5 md:h-5 mb-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z" />
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                        </svg>
+                        <span className="text-[10px] md:text-xs">進入專案</span>
+                      </button>
+                      <button 
+                        onClick={() => { setCurrentProjectId(p.id); setCurrentPage('settings'); }} 
+                        className="flex flex-col items-center justify-center p-2 text-slate-600 hover:bg-slate-100 rounded-lg transition"
+                        title="編輯專案"
+                      >
+                        <svg className="w-4 h-4 md:w-5 md:h-5 mb-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
+                        </svg>
+                        <span className="text-[10px] md:text-xs">編輯專案</span>
+                      </button>
+                      <button 
+                        onClick={() => moveProject(idx, 'up')} 
+                        disabled={idx === 0} 
+                        className="flex flex-col items-center justify-center p-2 text-slate-600 hover:bg-slate-100 disabled:opacity-30 disabled:cursor-not-allowed rounded-lg transition"
+                        title="上移"
+                      >
+                        <svg className="w-4 h-4 md:w-5 md:h-5 mb-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M5 15l7-7 7 7" />
+                        </svg>
+                        <span className="text-[10px] md:text-xs">上移</span>
+                      </button>
+                      <button 
+                        onClick={() => moveProject(idx, 'down')} 
+                        disabled={idx === projects.length - 1} 
+                        className="flex flex-col items-center justify-center p-2 text-slate-600 hover:bg-slate-100 disabled:opacity-30 disabled:cursor-not-allowed rounded-lg transition"
+                        title="下移"
+                      >
+                        <svg className="w-4 h-4 md:w-5 md:h-5 mb-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M19 9l-7 7-7-7" />
+                        </svg>
+                        <span className="text-[10px] md:text-xs">下移</span>
+                      </button>
+                      <button 
+                        onClick={() => duplicateProject(p)} 
+                        className="flex flex-col items-center justify-center p-2 text-blue-600 hover:bg-blue-50 rounded-lg transition"
+                        title="複製"
+                      >
+                        <svg className="w-4 h-4 md:w-5 md:h-5 mb-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
+                        </svg>
+                        <span className="text-[10px] md:text-xs">複製</span>
+                      </button>
+                      <button 
+                        onClick={() => deleteProject(p.id)} 
+                        className="flex flex-col items-center justify-center p-2 text-red-600 hover:bg-red-50 rounded-lg transition"
+                        title="刪除"
+                      >
+                        <svg className="w-4 h-4 md:w-5 md:h-5 mb-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                        </svg>
+                        <span className="text-[10px] md:text-xs">刪除</span>
+                      </button>
+                    </div>
+                  </>
                 )}
               </div>
             ))}
@@ -489,18 +514,18 @@ function TheaterApp() {
           <button onClick={() => setCurrentPage('projects')} className="mb-6 text-blue-600 hover:text-blue-700 font-semibold">← 回到專案列表</button>
           <h1 className="text-3xl font-bold text-slate-800 mb-8">{currentProject.name} - 設定</h1>
 
-          <div className="bg-white rounded-lg shadow-sm p-6 mb-8">
-            <h2 className="text-xl font-semibold text-slate-800 mb-4">新增章節</h2>
-            <div className="flex gap-2">
+          <div className="bg-white rounded-lg shadow-sm p-4 md:p-6 mb-6 md:mb-8">
+            <h2 className="text-lg md:text-xl font-semibold text-slate-800 mb-3 md:mb-4">新增章節</h2>
+            <div className="flex flex-col sm:flex-row gap-2">
               <input
                 type="text"
                 value={newChapterName}
                 onChange={(e) => setNewChapterName(e.target.value)}
                 placeholder="例：第一幕..."
-                className="flex-1 px-4 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                className="flex-1 px-3 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 text-sm md:text-base"
                 onKeyPress={(e) => e.key === 'Enter' && addChapter()}
               />
-              <button onClick={addChapter} className="bg-blue-600 text-white px-6 py-2 rounded-lg hover:bg-blue-700 transition">
+              <button onClick={addChapter} className="bg-blue-600 text-white px-4 py-2 rounded-lg hover:bg-blue-700 transition text-sm md:text-base whitespace-nowrap">
                 ➕ 新增章節
               </button>
             </div>
@@ -542,22 +567,22 @@ function TheaterApp() {
                 </div>
 
                 {newChapterId === chapter.id ? (
-                  <div className="mb-4 p-4 bg-slate-50 rounded-lg">
+                  <div className="mb-4 p-3 md:p-4 bg-slate-50 rounded-lg">
                     <input
                       type="text"
                       value={newSectionName}
                       onChange={(e) => setNewSectionName(e.target.value)}
                       placeholder="段落名稱..."
-                      className="w-full px-4 py-2 border border-slate-300 rounded-lg mb-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                      className="w-full px-3 py-2 border border-slate-300 rounded-lg mb-2 focus:outline-none focus:ring-2 focus:ring-blue-500 text-sm md:text-base"
                       autoFocus
                     />
                     <div className="flex gap-2">
-                      <button onClick={() => addSection(chapter.id)} className="bg-green-600 text-white px-4 py-2 rounded-lg hover:bg-green-700 transition text-sm">確認</button>
-                      <button onClick={() => { setNewChapterId(null); setNewSectionName(''); }} className="bg-slate-300 text-slate-800 px-4 py-2 rounded-lg hover:bg-slate-400 transition text-sm">取消</button>
+                      <button onClick={() => addSection(chapter.id)} className="bg-green-600 text-white px-3 md:px-4 py-2 rounded-lg hover:bg-green-700 transition text-sm">確認</button>
+                      <button onClick={() => { setNewChapterId(null); setNewSectionName(''); }} className="bg-slate-300 text-slate-800 px-3 md:px-4 py-2 rounded-lg hover:bg-slate-400 transition text-sm">取消</button>
                     </div>
                   </div>
                 ) : (
-                  <button onClick={() => setNewChapterId(chapter.id)} className="mb-4 text-blue-600 hover:text-blue-700 font-semibold">
+                  <button onClick={() => setNewChapterId(chapter.id)} className="mb-4 text-blue-600 hover:text-blue-700 font-semibold text-sm md:text-base">
                     ➕ 新增段落
                   </button>
                 )}

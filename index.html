@@ -1,0 +1,340 @@
+
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="theme-color" content="#0ea5e9" />
+  <title>Theater App - 雲端同步 + 離線</title>
+  <!-- Tailwind (CDN) -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <!-- React 18 UMD + Babel for JSX demo -->
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <style>
+    html,body,#root{height:100%}
+  </style>
+</head>
+<body class="min-h-screen bg-slate-50">
+  <div id="root" class="h-full"></div>
+
+  <!-- Firebase v10 SDK (ESM via type=module) -->
+  <script type="module">
+    import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.12.5/firebase-app.js';
+    import { 
+      getFirestore, collection, doc, setDoc, deleteDoc, onSnapshot, enableIndexedDbPersistence 
+    } from 'https://www.gstatic.com/firebasejs/10.12.5/firebase-firestore.js';
+    import { getAuth, signInAnonymously, onAuthStateChanged } from 'https://www.gstatic.com/firebasejs/10.12.5/firebase-auth.js';
+    import { getStorage, ref, uploadString, getDownloadURL } from 'https://www.gstatic.com/firebasejs/10.12.5/firebase-storage.js';
+
+    // TODO: 將下列 placeholder 換成你的 Firebase 專案設定
+    
+const firebaseConfig = {
+  apiKey: "AIzaSyCWB3RtXPejX8WMMu65F_woVffotLiyCPE",
+  authDomain: "nccutheater-ab03c.firebaseapp.com",
+  projectId: "nccutheater-ab03c",
+  storageBucket: "nccutheater-ab03c.firebasestorage.app",
+  messagingSenderId: "194078255051",
+  appId: "1:194078255051:web:92b65aa4515985711df84e"
+};
+
+
+    const app = initializeApp(firebaseConfig);
+    const db = getFirestore(app);
+    const auth = getAuth(app);
+    const storage = getStorage(app);
+
+    // Firestore 離線快取
+    enableIndexedDbPersistence(db).catch(() => {});
+
+    // 暴露給非 module 腳本
+    window.__FB__ = { app, db, auth, storage, collection, doc, setDoc, deleteDoc, onSnapshot, signInAnonymously, onAuthStateChanged, ref, uploadString, getDownloadURL };
+  </script>
+
+  <!-- App Script (Babel JSX) -->
+  <script type="text/babel">
+    const { useEffect, useMemo, useRef, useState } = React;
+
+    // ===== IndexedDB: Pending Upload Queue =====
+    const openIDB = () => new Promise((resolve, reject) => {
+      const req = indexedDB.open('TheaterAppDB', 2);
+      req.onupgradeneeded = (e) => {
+        const db = req.result;
+        if (!db.objectStoreNames.contains('pendingUploads')) {
+          db.createObjectStore('pendingUploads', { keyPath: 'id', autoIncrement: true });
+        }
+      };
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => reject(req.error);
+    });
+
+    async function addPendingUpload(item) {
+      const db = await openIDB();
+      const tx = db.transaction('pendingUploads', 'readwrite');
+      tx.objectStore('pendingUploads').add(item);
+      return tx.complete;
+    }
+    async function listPendingUploads() {
+      const db = await openIDB();
+      return new Promise((resolve, reject) => {
+        const tx = db.transaction('pendingUploads', 'readonly');
+        const store = tx.objectStore('pendingUploads');
+        const out = [];
+        const req = store.openCursor();
+        req.onsuccess = (e) => {
+          const cur = e.target.result;
+          if (cur) { out.push(cur.value); cur.continue(); }
+          else resolve(out);
+        };
+        req.onerror = () => reject(req.error);
+      });
+    }
+    async function removePendingUpload(id) {
+      const db = await openIDB();
+      const tx = db.transaction('pendingUploads', 'readwrite');
+      tx.objectStore('pendingUploads').delete(id);
+      return tx.complete;
+    }
+
+    // ===== Helpers =====
+    const uid = () => window.__FB__.auth.currentUser?.uid;
+    const userCol = (u) => window.__FB__.collection(window.__FB__.db, `users/${u}/projects`);
+
+    async function ensureAuth() {
+      await window.__FB__.signInAnonymously(window.__FB__.auth).catch(()=>{});
+      return new Promise((resolve) => {
+        window.__FB__.onAuthStateChanged(window.__FB__.auth, (user) => {
+          if (user) resolve(user);
+        });
+      });
+    }
+
+    // Runtime cache: audio fetch 會由 Service Worker 進行快取，離線可播放
+    // 新上傳檔案：若離線，先存 pendingUploads，恢復連線時自動上傳
+
+    function App() {
+      const [projects, setProjects] = useState([]);
+      const [currentId, setCurrentId] = useState(null);
+      const [newName, setNewName] = useState('');
+      const [isOnline, setIsOnline] = useState(navigator.onLine);
+      const [syncing, setSyncing] = useState(false);
+
+      // Online/Offline 標記
+      useEffect(() => {
+        const on = () => setIsOnline(true);
+        const off = () => setIsOnline(false);
+        window.addEventListener('online', on);
+        window.addEventListener('offline', off);
+        return () => { window.removeEventListener('online', on); window.removeEventListener('offline', off); };
+      }, []);
+
+      // Auth + subscribe
+      useEffect(() => {
+        let unsub = null;
+        (async () => {
+          const user = await ensureAuth();
+          const col = userCol(user.uid);
+          unsub = window.__FB__.onSnapshot(col, (snap) => {
+            const arr = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+            setProjects(arr);
+            if (arr.length && !currentId) setCurrentId(arr[0].id);
+          });
+        })();
+        return () => unsub && unsub();
+      }, []);
+
+      // Flush pending audio when back online
+      useEffect(() => {
+        async function flush() {
+          if (!navigator.onLine) return;
+          const items = await listPendingUploads();
+          if (!items.length) return;
+          setSyncing(true);
+          for (const it of items) {
+            try {
+              const { dataUrl, filename, projectId, sectionPath, id } = it;
+              const path = `users/${uid()}/audio/${Date.now()}_${filename}`;
+              const sref = window.__FB__.ref(window.__FB__.storage, path);
+              await window.__FB__.uploadString(sref, dataUrl, 'data_url');
+              const url = await window.__FB__.getDownloadURL(sref);
+
+              // 更新 Firestore 對應的 section audioUrl
+              const p = projects.find(p => p.id === projectId);
+              if (!p) { await removePendingUpload(id); continue; }
+              const updated = structuredClone(p);
+              const [chapterId, sectionId] = sectionPath;
+              updated.chapters = updated.chapters.map(c => c.id === chapterId ? ({
+                ...c,
+                sections: c.sections.map(s => s.id === sectionId ? ({ ...s, audioFile: filename, audioUrl: url }) : s)
+              }) : c);
+              await window.__FB__.setDoc(window.__FB__.doc(window.__FB__.db, `users/${uid()}/projects/${projectId}`), updated);
+              await removePendingUpload(id);
+            } catch (e) {
+              console.warn('replay upload failed, keep pending', e);
+            }
+          }
+          setSyncing(false);
+        }
+        flush();
+      }, [isOnline, projects]);
+
+      const current = projects.find(p => p.id === currentId);
+
+      async function addProject() {
+        const n = newName.trim();
+        if (!n) return;
+        const id = String(Date.now());
+        const body = { name: n, chapters: [] };
+        await window.__FB__.setDoc(window.__FB__.doc(window.__FB__.db, `users/${uid()}/projects/${id}`), body);
+        setNewName('');
+        setCurrentId(id);
+      }
+      async function removeProject(id) {
+        await window.__FB__.deleteDoc(window.__FB__.doc(window.__FB__.db, `users/${uid()}/projects/${id}`));
+        if (currentId === id) setCurrentId(null);
+      }
+      async function addChapter() {
+        if (!current) return;
+        const ch = { id: String(Date.now()), title: "新章節", sections: [] };
+        const updated = { ...current, chapters: [...(current.chapters||[]), ch] };
+        await window.__FB__.setDoc(window.__FB__.doc(window.__FB__.db, `users/${uid()}/projects/${current.id}`), updated);
+      }
+      async function addSection(chapterId) {
+        if (!current) return;
+        const sec = { id: String(Date.now()), title: "新段落", cue: "", audioUrl: null, audioFile: null };
+        const updated = { ...current, chapters: current.chapters.map(c => c.id===chapterId ? ({ ...c, sections: [...c.sections, sec] }) : c) };
+        await window.__FB__.setDoc(window.__FB__.doc(window.__FB__.db, `users/${uid()}/projects/${current.id}`), updated);
+      }
+      async function updateField(chapterId, sectionId, patch) {
+        const updated = { ...current, chapters: current.chapters.map(c => c.id===chapterId ? ({ 
+          ...c, sections: c.sections.map(s => s.id===sectionId ? ({ ...s, ...patch }) : s) 
+        }) : c) };
+        await window.__FB__.setDoc(window.__FB__.doc(window.__FB__.db, `users/${uid()}/projects/${current.id}`), updated);
+      }
+      function handleAudioUpload(chapterId, sectionId, file) {
+        if (!file) return;
+        const reader = new FileReader();
+        reader.onload = async (e) => {
+          const dataUrl = e.target.result;
+          // 先本地更新（可離線播放：使用 dataUrl 作為臨時來源）
+          await updateField(chapterId, sectionId, { audioFile: file.name, audioUrl: dataUrl, _temp: true });
+          if (navigator.onLine) {
+            // 直接上傳到 Storage
+            try {
+              const path = `users/${uid()}/audio/${Date.now()}_${file.name}`;
+              const sref = window.__FB__.ref(window.__FB__.storage, path);
+              await window.__FB__.uploadString(sref, dataUrl, 'data_url');
+              const url = await window.__FB__.getDownloadURL(sref);
+              await updateField(chapterId, sectionId, { audioUrl: url, _temp: false });
+            } catch (e) {
+              // 若上傳失敗，改成 pending
+              await addPendingUpload({ filename: file.name, dataUrl, projectId: current.id, sectionPath: [chapterId, sectionId] });
+            }
+          } else {
+            // 離線：先排入待上傳
+            await addPendingUpload({ filename: file.name, dataUrl, projectId: current.id, sectionPath: [chapterId, sectionId] });
+          }
+        };
+        reader.readAsDataURL(file);
+      }
+
+      return (
+        <div className="mx-auto max-w-6xl p-4 space-y-4">
+          <header className="flex items-center justify-between">
+            <h1 className="text-2xl font-bold">🎭 Theater App（雲端同步 + 離線）</h1>
+            <div className="flex items-center gap-2">
+              <span className={"px-2 py-1 rounded text-sm " + (isOnline ? "bg-emerald-100 text-emerald-700" : "bg-amber-100 text-amber-700")}>
+                {isOnline ? "線上" : "離線模式"}
+              </span>
+              {syncing && <span className="text-sm text-sky-700">正在同步待上傳音檔…</span>}
+            </div>
+          </header>
+
+          <section className="grid md:grid-cols-3 gap-4">
+            <div className="bg-white rounded-2xl shadow p-3 md:col-span-1">
+              <h2 className="font-semibold mb-2">專案</h2>
+              <div className="flex gap-2 mb-3">
+                <input className="input input-bordered w-full border rounded px-2 py-1" placeholder="新增專案名稱" value={newName} onChange={e=>setNewName(e.target.value)} />
+                <button className="px-3 py-1 rounded bg-sky-600 text-white" onClick={addProject}>新增</button>
+              </div>
+              <ul className="space-y-1">
+                {projects.map(p => (
+                  <li key={p.id} className={"flex items-center justify-between px-2 py-1 rounded " + (currentId===p.id?"bg-sky-50":"")}>
+                    <button className="text-left flex-1" onClick={()=>setCurrentId(p.id)}>
+                      <span className="font-medium">{p.name}</span>
+                    </button>
+                    <button className="text-rose-600 text-sm" onClick={()=>removeProject(p.id)}>刪除</button>
+                  </li>
+                ))}
+              </ul>
+            </div>
+
+            <div className="bg-white rounded-2xl shadow p-3 md:col-span-2">
+              {!current ? (
+                <p className="text-slate-500">請先建立或選擇一個專案。</p>
+              ) : (
+                <div className="space-y-4">
+                  <div className="flex items-center justify-between">
+                    <h2 className="font-semibold">專案：{current.name}</h2>
+                    <button className="px-3 py-1 rounded bg-slate-800 text-white" onClick={addChapter}>新增章節</button>
+                  </div>
+
+                  <div className="space-y-4">
+                    {current.chapters?.map(ch => (
+                      <div key={ch.id} className="border rounded-xl p-3">
+                        <div className="flex items-center justify-between">
+                          <input className="font-semibold w-full max-w-sm border rounded px-2 py-1"
+                                 value={ch.title}
+                                 onChange={(e)=>{
+                                   const updated = { ...current, chapters: current.chapters.map(c=>c.id===ch.id?{...c, title:e.target.value}:c) };
+                                   window.__FB__.setDoc(window.__FB__.doc(window.__FB__.db, `users/${uid()}/projects/${current.id}`), updated);
+                                 }}/>
+                          <button className="px-3 py-1 rounded bg-sky-600 text-white" onClick={()=>addSection(ch.id)}>新增段落</button>
+                        </div>
+                        <div className="mt-3 space-y-3">
+                          {ch.sections?.map(sec => (
+                            <div key={sec.id} className="rounded-lg border p-3 bg-slate-50">
+                              <div className="grid md:grid-cols-2 gap-3">
+                                <input className="border rounded px-2 py-1" value={sec.title}
+                                       onChange={e=>updateField(ch.id, sec.id, { title: e.target.value })} />
+                                <input className="border rounded px-2 py-1" placeholder="Cue" value={sec.cue||""}
+                                       onChange={e=>updateField(ch.id, sec.id, { cue: e.target.value })} />
+                              </div>
+                              <div className="mt-2 flex items-center gap-3">
+                                <input type="file" accept="audio/*" onChange={e=>handleAudioUpload(ch.id, sec.id, e.target.files[0])}/>
+                                {sec.audioUrl && (
+                                  <audio controls src={sec.audioUrl} className="w-full"></audio>
+                                )}
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+          </section>
+
+          <footer className="text-center text-xs text-slate-500 py-4">
+            Firebase Firestore 即時同步．Storage 音檔雲端儲存．Service Worker 離線快取
+          </footer>
+        </div>
+      );
+    }
+
+    // Render
+    const root = ReactDOM.createRoot(document.getElementById('root'));
+    root.render(<App />);
+
+    // ===== Service Worker for offline =====
+    if ('serviceWorker' in navigator) {
+      window.addEventListener('load', () => {
+        navigator.serviceWorker.register('./sw.js').catch(console.warn);
+      });
+    }
+  </script>
+</body>
+</html>

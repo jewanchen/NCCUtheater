@@ -1,0 +1,1026 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>傻瓜劇團音效管理系統</title>
+<script crossorigin src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script crossorigin src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone@7.23.5/babel.min.js"></script>
+<script src="https://cdn.tailwindcss.com"></script>
+<script type="module">
+  import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.7.1/firebase-app.js';
+  import { getFirestore, collection, getDocs, doc, setDoc, deleteDoc, onSnapshot } from 'https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore.js';
+
+  const firebaseConfig = {
+    apiKey: "AIzaSyCWB3RtXPejX8WMMu65F_woVffotLiyCPE",
+    authDomain: "nccutheater-ab03c.firebaseapp.com",
+    projectId: "nccutheater-ab03c",
+    storageBucket: "nccutheater-ab03c.firebasestorage.app",
+    messagingSenderId: "194078255051",
+    appId: "1:194078255051:web:92b65aa4515985711df84e"
+  };
+
+  const app = initializeApp(firebaseConfig);
+  const db = getFirestore(app);
+  
+  window.firebaseDB = db;
+  window.firebaseUtils = { collection, getDocs, doc, setDoc, deleteDoc, onSnapshot };
+  window.firebaseReady = true;
+  console.log('Firebase 已初始化');
+</script>
+<style>
+  body { margin: 0; padding: 0; }
+  #root { min-height: 100vh; }
+  /* 修復手機上 range input 的樣式 */
+  input[type="range"] {
+    -webkit-appearance: none;
+    appearance: none;
+    height: 8px;
+    border-radius: 4px;
+  }
+  input[type="range"]::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 16px;
+    height: 16px;
+    border-radius: 50%;
+    background: #3b82f6;
+    cursor: pointer;
+  }
+  input[type="range"]::-moz-range-thumb {
+    width: 16px;
+    height: 16px;
+    border-radius: 50%;
+    background: #3b82f6;
+    cursor: pointer;
+    border: none;
+  }
+</style>
+</head>
+<body>
+<div id="root"><div style="padding: 20px; text-align: center;">載入中...</div></div>
+<script type="text/babel">
+console.log('Script starting...');
+console.log('React:', typeof React);
+console.log('ReactDOM:', typeof ReactDOM);
+const { useState, useRef, useEffect } = React;
+
+const DB_NAME = 'TheaterAppDB';
+const STORE_NAME = 'projects';
+
+const initDB = () => {
+  return new Promise((resolve, reject) => {
+    const request = indexedDB.open(DB_NAME, 1);
+    request.onerror = () => reject(request.error);
+    request.onsuccess = () => resolve(request.result);
+    request.onupgradeneeded = (e) => {
+      const db = e.target.result;
+      if (!db.objectStoreNames.contains(STORE_NAME)) {
+        db.createObjectStore(STORE_NAME, { keyPath: 'id' });
+      }
+    };
+  });
+};
+
+const saveProjectsToDB = async (projects) => {
+  const db = await initDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE_NAME, 'readwrite');
+    const store = tx.objectStore(STORE_NAME);
+    store.clear();
+    projects.forEach(p => store.add(p));
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+};
+
+const loadProjectsFromDB = async () => {
+  const db = await initDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE_NAME, 'readonly');
+    const store = tx.objectStore(STORE_NAME);
+    const request = store.getAll();
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+  });
+};
+
+function TheaterApp() {
+  const [projects, setProjects] = useState([]);
+  const [currentProjectId, setCurrentProjectId] = useState(null);
+  const [currentPage, setCurrentPage] = useState('projects');
+  const [newProjectName, setNewProjectName] = useState('');
+  const [newChapterName, setNewChapterName] = useState('');
+  const [newSectionName, setNewSectionName] = useState('');
+  const [newChapterId, setNewChapterId] = useState(null);
+  const [currentPlayingId, setCurrentPlayingId] = useState(null);
+  const [isPaused, setIsPaused] = useState(false);
+  const [volume, setVolume] = useState(1);
+  const [isLoading, setIsLoading] = useState(true);
+  const [currentTime, setCurrentTime] = useState(0);
+  const [duration, setDuration] = useState(0);
+  const [editingProjectId, setEditingProjectId] = useState(null);
+  const [editingProjectName, setEditingProjectName] = useState('');
+  const [editingChapterId, setEditingChapterId] = useState(null);
+  const [editingChapterName, setEditingChapterName] = useState('');
+  const [editingSectionId, setEditingSectionId] = useState(null);
+  const [editingSectionName, setEditingSectionName] = useState('');
+  const [isSyncing, setIsSyncing] = useState(false);
+  const audioRef = useRef(null);
+
+  // 等待 Firebase 初始化
+  const waitForFirebase = () => {
+    return new Promise((resolve) => {
+      const check = () => {
+        if (window.firebaseReady && window.firebaseDB) {
+          resolve();
+        } else {
+          setTimeout(check, 100);
+        }
+      };
+      check();
+    });
+  };
+
+  // Firebase Firestore functions
+  const saveProjectsToFirebase = async (projects) => {
+    if (!window.firebaseDB) {
+      console.log('Firebase 未初始化');
+      return;
+    }
+    const { collection, doc, setDoc } = window.firebaseUtils;
+    
+    try {
+      for (const project of projects) {
+        // 移除音檔資料（太大無法存 Firestore）
+        const projectToSave = {
+          ...project,
+          chapters: project.chapters.map(chapter => ({
+            ...chapter,
+            sections: chapter.sections.map(section => ({
+              id: section.id,
+              name: section.name,
+              cue: section.cue,
+              audioFile: section.audioFile // 只保存檔名，不保存音檔資料
+              // audioData 不儲存
+            }))
+          }))
+        };
+        
+        const docRef = doc(window.firebaseDB, 'projects', project.id.toString());
+        await setDoc(docRef, projectToSave);
+      }
+      console.log('已同步到 Firebase（音檔存本地）');
+    } catch (error) {
+      console.error('Firebase 同步失敗:', error);
+      throw error;
+    }
+  };
+
+  const loadProjectsFromFirebase = async () => {
+    if (!window.firebaseDB) {
+      console.log('Firebase 未初始化');
+      return [];
+    }
+    const { collection, getDocs } = window.firebaseUtils;
+    
+    try {
+      const querySnapshot = await getDocs(collection(window.firebaseDB, 'projects'));
+      const firebaseProjects = [];
+      querySnapshot.forEach((doc) => {
+        firebaseProjects.push(doc.data());
+      });
+      
+      // 如果有本地資料，合併音檔資料
+      if (firebaseProjects.length > 0) {
+        try {
+          const localProjects = await loadProjectsFromDB();
+          
+          // 合併：從 Firebase 取結構，從本地取音檔
+          const mergedProjects = firebaseProjects.map(fbProject => {
+            const localProject = localProjects.find(lp => lp.id === fbProject.id);
+            if (!localProject) return fbProject;
+            
+            return {
+              ...fbProject,
+              chapters: fbProject.chapters.map(fbChapter => {
+                const localChapter = localProject.chapters.find(lc => lc.id === fbChapter.id);
+                if (!localChapter) return fbChapter;
+                
+                return {
+                  ...fbChapter,
+                  sections: fbChapter.sections.map(fbSection => {
+                    const localSection = localChapter.sections.find(ls => ls.id === fbSection.id);
+                    if (!localSection || !localSection.audioData) return fbSection;
+                    
+                    // 合併音檔資料
+                    return {
+                      ...fbSection,
+                      audioData: localSection.audioData
+                    };
+                  })
+                };
+              })
+            };
+          });
+          
+          console.log('從 Firebase 載入:', mergedProjects.length, '個專案（已合併本地音檔）');
+          return mergedProjects;
+        } catch (e) {
+          console.log('無法合併本地音檔:', e);
+          return firebaseProjects;
+        }
+      }
+      
+      console.log('從 Firebase 載入:', firebaseProjects.length, '個專案');
+      return firebaseProjects;
+    } catch (error) {
+      console.error('Firebase 載入失敗:', error);
+      throw error;
+    }
+  };
+
+  const deleteProjectFromFirebase = async (projectId) => {
+    if (!window.firebaseDB) {
+      console.log('Firebase 未初始化');
+      return;
+    }
+    const { doc, deleteDoc } = window.firebaseUtils;
+    
+    try {
+      await deleteDoc(doc(window.firebaseDB, 'projects', projectId.toString()));
+      console.log('已從 Firebase 刪除');
+    } catch (error) {
+      console.error('Firebase 刪除失敗:', error);
+    }
+  };
+
+  useEffect(() => {
+    const loadData = async () => {
+      try {
+        const savedProjects = await loadProjectsFromDB();
+        setProjects(savedProjects);
+      } catch (error) {
+        console.error('載入資料失敗:', error);
+      }
+      setIsLoading(false);
+    };
+    loadData();
+  }, []);
+
+  useEffect(() => {
+    const syncData = async () => {
+      if (!isLoading && projects.length >= 0) {
+        // 同時保存到本地和 Firebase
+        try {
+          await saveProjectsToDB(projects);
+          console.log('已保存到本地快取');
+        } catch (e) {
+          console.log('本地保存失敗:', e.message);
+        }
+        
+        // 等待 Firebase 準備好
+        await waitForFirebase();
+        
+        try {
+          await saveProjectsToFirebase(projects);
+          console.log('已同步到 Firebase');
+        } catch (e) {
+          console.log('Firebase 保存失敗（可能離線）:', e.message);
+        }
+      }
+    };
+    
+    syncData();
+  }, [projects, isLoading]);
+
+  const currentProject = projects.find(p => p.id === currentProjectId);
+
+  const addProject = () => {
+    if (!newProjectName.trim()) return;
+    setProjects([...projects, { id: Date.now(), name: newProjectName, chapters: [] }]);
+    setNewProjectName('');
+  };
+
+  const deleteProject = (id) => {
+    const project = projects.find(p => p.id === id);
+    if (window.confirm(`確定要刪除專案「${project.name}」嗎？\n刪除後將無法復原。`)) {
+      setProjects(projects.filter(p => p.id !== id));
+      deleteProjectFromFirebase(id); // 同時從 Firebase 刪除
+      if (currentProjectId === id) {
+        setCurrentProjectId(null);
+        setCurrentPage('projects');
+      }
+    }
+  };
+
+  const duplicateProject = (projectToDuplicate) => {
+    const baseName = projectToDuplicate.name;
+    let copyNumber = 1;
+    let newName = `${baseName} (複製 ${copyNumber})`;
+    while (projects.some(p => p.name === newName)) {
+      copyNumber++;
+      newName = `${baseName} (複製 ${copyNumber})`;
+    }
+    const newProject = {
+      id: Date.now(),
+      name: newName,
+      chapters: projectToDuplicate.chapters.map(chapter => ({
+        ...chapter,
+        id: Date.now() + Math.random(),
+        sections: chapter.sections.map(section => ({ ...section, id: Date.now() + Math.random() }))
+      }))
+    };
+    setProjects([...projects, newProject]);
+  };
+
+  const moveProject = (index, direction) => {
+    const newProjects = [...projects];
+    const newIndex = direction === 'up' ? index - 1 : index + 1;
+    if (newIndex < 0 || newIndex >= newProjects.length) return;
+    [newProjects[index], newProjects[newIndex]] = [newProjects[newIndex], newProjects[index]];
+    setProjects(newProjects);
+  };
+
+  const updateProjectName = (id, newName) => {
+    if (!newName.trim()) return;
+    setProjects(projects.map(p => p.id === id ? { ...p, name: newName } : p));
+    setEditingProjectId(null);
+  };
+
+  const updateChapterName = (chapterId, newName) => {
+    if (!newName.trim()) return;
+    const updatedProject = {
+      ...currentProject,
+      chapters: currentProject.chapters.map(c => 
+        c.id === chapterId ? { ...c, name: newName } : c
+      )
+    };
+    setProjects(projects.map(p => p.id === currentProjectId ? updatedProject : p));
+    setEditingChapterId(null);
+  };
+
+  const updateSectionName = (chapterId, sectionId, newName) => {
+    if (!newName.trim()) return;
+    const updatedProject = {
+      ...currentProject,
+      chapters: currentProject.chapters.map(c =>
+        c.id === chapterId
+          ? {
+              ...c,
+              sections: c.sections.map(s =>
+                s.id === sectionId ? { ...s, name: newName } : s
+              )
+            }
+          : c
+      )
+    };
+    setProjects(projects.map(p => p.id === currentProjectId ? updatedProject : p));
+    setEditingSectionId(null);
+  };
+
+  const manualSync = async () => {
+    setIsSyncing(true);
+    try {
+      // 等待 Firebase 準備好
+      await waitForFirebase();
+      
+      // 先上傳本地資料到 Firebase
+      console.log('上傳資料到 Firebase...');
+      await saveProjectsToFirebase(projects);
+      
+      // 然後從 Firebase 拉取最新資料
+      console.log('從 Firebase 拉取資料...');
+      const firebaseProjects = await loadProjectsFromFirebase();
+      if (firebaseProjects.length > 0) {
+        setProjects(firebaseProjects);
+        console.log('同步成功！載入了', firebaseProjects.length, '個專案');
+      }
+      
+      alert('同步成功！✓');
+    } catch (error) {
+      console.error('同步失敗:', error);
+      alert('同步失敗：' + error.message);
+    }
+    setIsSyncing(false);
+  };
+
+  const addChapter = () => {
+    if (!newChapterName.trim() || !currentProject) return;
+    const updatedProject = {
+      ...currentProject,
+      chapters: [...currentProject.chapters, { id: Date.now(), name: newChapterName, sections: [] }]
+    };
+    setProjects(projects.map(p => p.id === currentProjectId ? updatedProject : p));
+    setNewChapterName('');
+  };
+
+  const deleteChapter = (chapterId) => {
+    const updatedProject = {
+      ...currentProject,
+      chapters: currentProject.chapters.filter(c => c.id !== chapterId)
+    };
+    setProjects(projects.map(p => p.id === currentProjectId ? updatedProject : p));
+  };
+
+  const moveChapter = (index, direction) => {
+    const chapters = [...currentProject.chapters];
+    const newIndex = direction === 'up' ? index - 1 : index + 1;
+    if (newIndex < 0 || newIndex >= chapters.length) return;
+    [chapters[index], chapters[newIndex]] = [chapters[newIndex], chapters[index]];
+    setProjects(projects.map(p => p.id === currentProjectId ? { ...currentProject, chapters } : p));
+  };
+
+  const addSection = (chapterId) => {
+    if (!newSectionName.trim() || !currentProject) return;
+    const updatedProject = {
+      ...currentProject,
+      chapters: currentProject.chapters.map(c =>
+        c.id === chapterId
+          ? { ...c, sections: [...c.sections, { id: Date.now(), name: newSectionName, cue: '', audioFile: null, audioData: null }] }
+          : c
+      )
+    };
+    setProjects(projects.map(p => p.id === currentProjectId ? updatedProject : p));
+    setNewSectionName('');
+    setNewChapterId(null);
+  };
+
+  const deleteSection = (chapterId, sectionId) => {
+    const updatedProject = {
+      ...currentProject,
+      chapters: currentProject.chapters.map(c =>
+        c.id === chapterId ? { ...c, sections: c.sections.filter(s => s.id !== sectionId) } : c
+      )
+    };
+    setProjects(projects.map(p => p.id === currentProjectId ? updatedProject : p));
+  };
+
+  const moveSection = (chapterId, index, direction) => {
+    const updatedProject = {
+      ...currentProject,
+      chapters: currentProject.chapters.map(c => {
+        if (c.id === chapterId) {
+          const sections = [...c.sections];
+          const newIndex = direction === 'up' ? index - 1 : index + 1;
+          if (newIndex < 0 || newIndex >= sections.length) return c;
+          [sections[index], sections[newIndex]] = [sections[newIndex], sections[index]];
+          return { ...c, sections };
+        }
+        return c;
+      })
+    };
+    setProjects(projects.map(p => p.id === currentProjectId ? updatedProject : p));
+  };
+
+  const updateSectionCue = (chapterId, sectionId, cue) => {
+    const updatedProject = {
+      ...currentProject,
+      chapters: currentProject.chapters.map(c =>
+        c.id === chapterId
+          ? { ...c, sections: c.sections.map(s => s.id === sectionId ? { ...s, cue } : s) }
+          : c
+      )
+    };
+    setProjects(projects.map(p => p.id === currentProjectId ? updatedProject : p));
+  };
+
+  const handleAudioUpload = (chapterId, sectionId, file) => {
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      const dataUrl = e.target.result;
+      const updatedProject = {
+        ...currentProject,
+        chapters: currentProject.chapters.map(c =>
+          c.id === chapterId
+            ? { ...c, sections: c.sections.map(s => s.id === sectionId ? { ...s, audioFile: file.name, audioData: dataUrl } : s) }
+            : c
+        )
+      };
+      setProjects(projects.map(p => p.id === currentProjectId ? updatedProject : p));
+    };
+    reader.readAsDataURL(file);
+  };
+
+  const togglePlaySection = (section, sectionId) => {
+    if (!section.audioData) return;
+    
+    // 如果點擊的是正在播放的音檔（播放中）
+    if (currentPlayingId === sectionId && audioRef.current && !audioRef.current.paused) {
+      // 暫停，保持當前播放位置
+      audioRef.current.pause();
+      setIsPaused(true);
+      return;
+    }
+    
+    // 如果點擊的是暫停中的同一個音檔
+    if (currentPlayingId === sectionId && isPaused && audioRef.current) {
+      // 繼續播放（不重設 src，保持當前位置）
+      audioRef.current.play();
+      setIsPaused(false);
+      return;
+    }
+    
+    // 播放新的音檔（重頭開始）
+    if (audioRef.current) {
+      audioRef.current.src = section.audioData;
+      audioRef.current.load();
+      audioRef.current.play();
+      setCurrentPlayingId(sectionId);
+      setIsPaused(false);
+    }
+  };
+
+  if (isLoading) {
+    return (
+      <div className="min-h-screen bg-gradient-to-br from-slate-50 to-slate-100 flex items-center justify-center">
+        <div className="text-center">
+          <div className="animate-spin w-12 h-12 border-4 border-blue-200 border-t-blue-600 rounded-full mx-auto mb-4"></div>
+          <p className="text-slate-600">載入中...</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (currentPage === 'projects') {
+    return (
+      <div className="min-h-screen bg-gradient-to-br from-slate-50 to-slate-100 p-4 md:p-6">
+        <div className="max-w-2xl mx-auto">
+          <div className="flex items-center justify-between mb-6 md:mb-8">
+            <div>
+              <h1 className="text-2xl md:text-4xl font-bold text-slate-800">傻瓜劇團音效管理系統</h1>
+              <div className="text-xs text-slate-500 flex flex-col sm:flex-row items-start sm:items-center gap-1 sm:gap-2 mt-1">
+                <span>📥 音檔存本地</span>
+                <span>☁️ 專案雲端同步</span>
+              </div>
+            </div>
+            <button
+              onClick={manualSync}
+              disabled={isSyncing}
+              className="flex flex-col items-center justify-center px-3 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              <svg className={`w-5 h-5 ${isSyncing ? 'animate-spin' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+              </svg>
+              <span className="text-[10px] mt-1">{isSyncing ? '同步中...' : '手動同步'}</span>
+            </button>
+          </div>
+          
+          <div className="bg-white rounded-lg shadow-sm p-4 md:p-6 mb-6">
+            <div className="flex flex-col sm:flex-row gap-2">
+              <input
+                type="text"
+                value={newProjectName}
+                onChange={(e) => setNewProjectName(e.target.value)}
+                placeholder="輸入新專案名稱..."
+                className="flex-1 px-3 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 text-sm md:text-base"
+                onKeyPress={(e) => e.key === 'Enter' && addProject()}
+              />
+              <button onClick={addProject} className="bg-blue-600 text-white px-4 py-2 rounded-lg hover:bg-blue-700 transition text-sm md:text-base whitespace-nowrap">
+                ➕ 新增
+              </button>
+            </div>
+          </div>
+
+          <div className="space-y-3">
+            {projects.map((p, idx) => (
+              <div key={p.id} className="bg-white rounded-lg shadow-sm p-4 hover:shadow-md transition">
+                {editingProjectId === p.id ? (
+                  <div className="flex gap-2 flex-1">
+                    <input
+                      type="text"
+                      value={editingProjectName}
+                      onChange={(e) => setEditingProjectName(e.target.value)}
+                      className="flex-1 px-3 py-2 border border-blue-400 rounded focus:outline-none focus:ring-2 focus:ring-blue-500 text-sm"
+                      autoFocus
+                      onKeyPress={(e) => e.key === 'Enter' && updateProjectName(p.id, editingProjectName)}
+                    />
+                    <button onClick={() => updateProjectName(p.id, editingProjectName)} className="px-3 py-2 bg-green-500 text-white rounded hover:bg-green-600 text-sm">✓</button>
+                    <button onClick={() => setEditingProjectId(null)} className="px-3 py-2 bg-slate-300 text-slate-700 rounded hover:bg-slate-400 text-sm">✕</button>
+                  </div>
+                ) : (
+                  <>
+                    <div className="flex-1 mb-3">
+                      <h3 
+                        className="font-semibold text-slate-800 text-base md:text-lg hover:text-blue-600 hover:underline cursor-pointer"
+                        onClick={() => {
+                          setEditingProjectId(p.id);
+                          setEditingProjectName(p.name);
+                        }}
+                      >{p.name}</h3>
+                      <p className="text-xs md:text-sm text-slate-500">{p.chapters.length} 幕</p>
+                    </div>
+                    <div className="grid grid-cols-3 sm:flex sm:flex-wrap gap-2">
+                      <button 
+                        onClick={() => { setCurrentProjectId(p.id); setCurrentPage('play'); }} 
+                        className="flex flex-col items-center justify-center p-2 text-green-600 hover:bg-green-50 rounded-lg transition"
+                        title="進入專案"
+                      >
+                        <svg className="w-4 h-4 md:w-5 md:h-5 mb-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z" />
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                        </svg>
+                        <span className="text-[10px] md:text-xs">進入專案</span>
+                      </button>
+                      <button 
+                        onClick={() => { setCurrentProjectId(p.id); setCurrentPage('settings'); }} 
+                        className="flex flex-col items-center justify-center p-2 text-slate-600 hover:bg-slate-100 rounded-lg transition"
+                        title="編輯專案"
+                      >
+                        <svg className="w-4 h-4 md:w-5 md:h-5 mb-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
+                        </svg>
+                        <span className="text-[10px] md:text-xs">編輯專案</span>
+                      </button>
+                      <button 
+                        onClick={() => moveProject(idx, 'up')} 
+                        disabled={idx === 0} 
+                        className="flex flex-col items-center justify-center p-2 text-slate-600 hover:bg-slate-100 disabled:opacity-30 disabled:cursor-not-allowed rounded-lg transition"
+                        title="上移"
+                      >
+                        <svg className="w-4 h-4 md:w-5 md:h-5 mb-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M5 15l7-7 7 7" />
+                        </svg>
+                        <span className="text-[10px] md:text-xs">上移</span>
+                      </button>
+                      <button 
+                        onClick={() => moveProject(idx, 'down')} 
+                        disabled={idx === projects.length - 1} 
+                        className="flex flex-col items-center justify-center p-2 text-slate-600 hover:bg-slate-100 disabled:opacity-30 disabled:cursor-not-allowed rounded-lg transition"
+                        title="下移"
+                      >
+                        <svg className="w-4 h-4 md:w-5 md:h-5 mb-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M19 9l-7 7-7-7" />
+                        </svg>
+                        <span className="text-[10px] md:text-xs">下移</span>
+                      </button>
+                      <button 
+                        onClick={() => duplicateProject(p)} 
+                        className="flex flex-col items-center justify-center p-2 text-blue-600 hover:bg-blue-50 rounded-lg transition"
+                        title="複製"
+                      >
+                        <svg className="w-4 h-4 md:w-5 md:h-5 mb-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
+                        </svg>
+                        <span className="text-[10px] md:text-xs">複製</span>
+                      </button>
+                      <button 
+                        onClick={() => deleteProject(p.id)} 
+                        className="flex flex-col items-center justify-center p-2 text-red-600 hover:bg-red-50 rounded-lg transition"
+                        title="刪除"
+                      >
+                        <svg className="w-4 h-4 md:w-5 md:h-5 mb-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                        </svg>
+                        <span className="text-[10px] md:text-xs">刪除</span>
+                      </button>
+                    </div>
+                  </>
+                )}
+              </div>
+            ))}
+          </div>
+
+          {projects.length === 0 && (
+            <div className="text-center text-slate-400 py-12">
+              <p>還沒有任何專案，新增一個開始吧！</p>
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  if (currentPage === 'settings' && currentProject) {
+    return (
+      <div className="min-h-screen bg-gradient-to-br from-slate-50 to-slate-100 p-4 md:p-6">
+        <div className="max-w-4xl mx-auto">
+          <div className="flex items-center justify-between mb-6">
+            <button onClick={() => setCurrentPage('projects')} className="text-blue-600 hover:text-blue-700 font-semibold text-sm md:text-base">← 回到專案列表</button>
+            <button
+              onClick={manualSync}
+              disabled={isSyncing}
+              className="flex items-center gap-1 px-3 py-1 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition text-xs disabled:opacity-50"
+            >
+              <svg className={`w-4 h-4 ${isSyncing ? 'animate-spin' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+              </svg>
+              {isSyncing ? '同步中' : '同步'}
+            </button>
+          </div>
+          <h1 className="text-2xl md:text-3xl font-bold text-slate-800 mb-6 md:mb-8">{currentProject.name} - 設定</h1>
+
+          <div className="bg-white rounded-lg shadow-sm p-4 md:p-6 mb-6 md:mb-8">
+            <h2 className="text-lg md:text-xl font-semibold text-slate-800 mb-3 md:mb-4">新增章節</h2>
+            <div className="flex flex-col sm:flex-row gap-2">
+              <input
+                type="text"
+                value={newChapterName}
+                onChange={(e) => setNewChapterName(e.target.value)}
+                placeholder="例：第一幕..."
+                className="flex-1 px-3 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 text-sm md:text-base"
+                onKeyPress={(e) => e.key === 'Enter' && addChapter()}
+              />
+              <button onClick={addChapter} className="bg-blue-600 text-white px-4 py-2 rounded-lg hover:bg-blue-700 transition text-sm md:text-base whitespace-nowrap">
+                ➕ 新增章節
+              </button>
+            </div>
+          </div>
+
+          <div className="space-y-6">
+            {currentProject.chapters.map((chapter, idx) => (
+              <div key={chapter.id} className="bg-white rounded-lg shadow-sm p-6">
+                <div className="flex items-center justify-between mb-4">
+                  {editingChapterId === chapter.id ? (
+                    <div className="flex gap-2 flex-1">
+                      <input
+                        type="text"
+                        value={editingChapterName}
+                        onChange={(e) => setEditingChapterName(e.target.value)}
+                        className="flex-1 px-3 py-2 border border-blue-400 rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
+                        autoFocus
+                        onKeyPress={(e) => e.key === 'Enter' && updateChapterName(chapter.id, editingChapterName)}
+                      />
+                      <button onClick={() => updateChapterName(chapter.id, editingChapterName)} className="px-4 py-2 bg-green-500 text-white rounded hover:bg-green-600">✓</button>
+                      <button onClick={() => setEditingChapterId(null)} className="px-4 py-2 bg-slate-300 text-slate-700 rounded hover:bg-slate-400">✕</button>
+                    </div>
+                  ) : (
+                    <h3 
+                      className="text-lg font-semibold text-slate-800 hover:text-blue-600 hover:underline cursor-pointer"
+                      onClick={() => {
+                        setEditingChapterId(chapter.id);
+                        setEditingChapterName(chapter.name);
+                      }}
+                    >{chapter.name}</h3>
+                  )}
+                  {editingChapterId !== chapter.id && (
+                    <div className="flex gap-2">
+                      <button onClick={() => moveChapter(idx, 'up')} disabled={idx === 0} className="p-2 text-slate-600 hover:bg-slate-100 disabled:opacity-50 rounded-lg transition">▲</button>
+                      <button onClick={() => moveChapter(idx, 'down')} disabled={idx === currentProject.chapters.length - 1} className="p-2 text-slate-600 hover:bg-slate-100 disabled:opacity-50 rounded-lg transition">▼</button>
+                      <button onClick={() => deleteChapter(chapter.id)} className="p-2 text-red-600 hover:bg-red-50 rounded-lg transition">🗑️</button>
+                    </div>
+                  )}
+                </div>
+
+                {newChapterId === chapter.id ? (
+                  <div className="mb-4 p-3 md:p-4 bg-slate-50 rounded-lg">
+                    <input
+                      type="text"
+                      value={newSectionName}
+                      onChange={(e) => setNewSectionName(e.target.value)}
+                      placeholder="段落名稱..."
+                      className="w-full px-3 py-2 border border-slate-300 rounded-lg mb-2 focus:outline-none focus:ring-2 focus:ring-blue-500 text-sm md:text-base"
+                      autoFocus
+                    />
+                    <div className="flex gap-2">
+                      <button onClick={() => addSection(chapter.id)} className="bg-green-600 text-white px-3 md:px-4 py-2 rounded-lg hover:bg-green-700 transition text-sm">確認</button>
+                      <button onClick={() => { setNewChapterId(null); setNewSectionName(''); }} className="bg-slate-300 text-slate-800 px-3 md:px-4 py-2 rounded-lg hover:bg-slate-400 transition text-sm">取消</button>
+                    </div>
+                  </div>
+                ) : (
+                  <button onClick={() => setNewChapterId(chapter.id)} className="mb-4 text-blue-600 hover:text-blue-700 font-semibold text-sm md:text-base">
+                    ➕ 新增段落
+                  </button>
+                )}
+
+                <div className="space-y-3">
+                  {chapter.sections.map((section, sIdx) => (
+                    <div key={section.id} className="border border-slate-200 rounded-lg p-4 bg-slate-50">
+                      <div className="flex items-center justify-between mb-3">
+                        {editingSectionId === section.id ? (
+                          <div className="flex gap-2 flex-1">
+                            <input
+                              type="text"
+                              value={editingSectionName}
+                              onChange={(e) => setEditingSectionName(e.target.value)}
+                              className="flex-1 px-3 py-1 border border-blue-400 rounded text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                              autoFocus
+                              onKeyPress={(e) => e.key === 'Enter' && updateSectionName(chapter.id, section.id, editingSectionName)}
+                            />
+                            <button onClick={() => updateSectionName(chapter.id, section.id, editingSectionName)} className="px-3 py-1 bg-green-500 text-white rounded text-sm hover:bg-green-600">✓</button>
+                            <button onClick={() => setEditingSectionId(null)} className="px-3 py-1 bg-slate-300 text-slate-700 rounded text-sm hover:bg-slate-400">✕</button>
+                          </div>
+                        ) : (
+                          <p 
+                            className="font-medium text-slate-700 hover:text-blue-600 hover:underline cursor-pointer"
+                            onClick={() => {
+                              setEditingSectionId(section.id);
+                              setEditingSectionName(section.name);
+                            }}
+                          >{section.name}</p>
+                        )}
+                        {editingSectionId !== section.id && (
+                          <div className="flex gap-1">
+                            <button onClick={() => moveSection(chapter.id, sIdx, 'up')} disabled={sIdx === 0} className="p-1 text-slate-600 hover:bg-slate-200 disabled:opacity-50 rounded transition">▲</button>
+                            <button onClick={() => moveSection(chapter.id, sIdx, 'down')} disabled={sIdx === chapter.sections.length - 1} className="p-1 text-slate-600 hover:bg-slate-200 disabled:opacity-50 rounded transition">▼</button>
+                            <button onClick={() => deleteSection(chapter.id, section.id)} className="p-1 text-red-600 hover:bg-red-50 rounded transition">🗑️</button>
+                          </div>
+                        )}
+                      </div>
+                      
+                      <input
+                        type="text"
+                        value={section.cue}
+                        onChange={(e) => updateSectionCue(chapter.id, section.id, e.target.value)}
+                        placeholder="提示詞..."
+                        className="w-full px-3 py-2 border border-slate-300 rounded mb-3 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                      />
+
+                      <div className="flex items-center gap-2">
+                        <label className="flex items-center gap-2 cursor-pointer text-sm flex-1">
+                          <input
+                            type="file"
+                            accept="audio/mpeg,audio/mp3,audio/mp4,audio/m4a,.mp3,.mp4,.m4a"
+                            onChange={(e) => handleAudioUpload(chapter.id, section.id, e.target.files?.[0])}
+                            className="hidden"
+                          />
+                          <span className="px-3 py-2 bg-slate-200 hover:bg-slate-300 rounded transition w-full text-center">
+                            {section.audioFile ? '✓ ' + section.audioFile : '上傳音檔 (mp3/mp4)'}
+                          </span>
+                        </label>
+                        {section.audioFile && (
+                          <button
+                            onClick={() => handleDeleteAudio(chapter.id, section.id)}
+                            className="px-3 py-2 bg-red-500 text-white rounded hover:bg-red-600 transition text-sm flex items-center gap-1 flex-shrink-0"
+                            title="刪除音檔"
+                            type="button"
+                          >
+                            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                            </svg>
+                            刪除
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (currentPage === 'play' && currentProject) {
+    return (
+      <div className="min-h-screen bg-gradient-to-br from-slate-50 to-slate-100 p-4 md:p-6">
+        <div className="max-w-5xl mx-auto">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between mb-6 gap-4">
+            <div>
+              <button onClick={() => setCurrentPage('projects')} className="text-blue-600 hover:text-blue-700 font-semibold mb-2 text-sm md:text-base">← 回到專案列表</button>
+              <h1 className="text-2xl md:text-3xl font-bold text-slate-800">{currentProject.name}</h1>
+            </div>
+            <div className="flex gap-2">
+              <button
+                onClick={manualSync}
+                disabled={isSyncing}
+                className="flex items-center gap-1 px-3 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition text-xs disabled:opacity-50"
+              >
+                <svg className={`w-4 h-4 ${isSyncing ? 'animate-spin' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                </svg>
+                {isSyncing ? '同步中' : '同步'}
+              </button>
+              <button 
+                onClick={() => setCurrentPage('settings')} 
+                className="flex items-center gap-2 px-4 py-2 bg-white text-slate-700 border border-slate-300 rounded-lg hover:bg-slate-50 transition shadow-sm"
+              >
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
+                </svg>
+                <span className="text-sm font-medium hidden sm:inline">編輯專案</span>
+              </button>
+            </div>
+          </div>
+
+          <div className="space-y-6 mb-8">
+            {currentProject.chapters.map(chapter => (
+              <div key={chapter.id} className="bg-white rounded-lg shadow-sm p-4 md:p-6">
+                <h2 className="text-lg md:text-xl font-semibold text-slate-800 mb-4">{chapter.name}</h2>
+                <div className="space-y-3">
+                  {chapter.sections.map(section => {
+                    const isPlaying = currentPlayingId === section.id && !isPaused;
+                    const isPausedState = currentPlayingId === section.id && isPaused;
+                    return (
+                      <div key={section.id} className={`border-2 rounded-lg p-4 transition ${isPlaying ? 'border-blue-500 bg-blue-50' : isPausedState ? 'border-yellow-500 bg-yellow-50' : 'border-slate-200 bg-white hover:border-slate-300'}`}>
+                        <div className="flex items-start gap-3">
+                          <button
+                            onClick={() => togglePlaySection(section, section.id)}
+                            disabled={!section.audioData}
+                            className={`flex-shrink-0 w-12 h-12 rounded-lg flex items-center justify-center transition ${
+                              !section.audioData
+                                ? 'bg-slate-200 text-slate-400 cursor-not-allowed'
+                                : isPlaying
+                                ? 'bg-blue-600 text-white hover:bg-blue-700'
+                                : isPausedState
+                                ? 'bg-yellow-600 text-white hover:bg-yellow-700'
+                                : 'bg-slate-700 text-white hover:bg-slate-800'
+                            }`}
+                          >
+                            {isPlaying ? (
+                              <svg className="w-6 h-6" fill="currentColor" viewBox="0 0 24 24">
+                                <path d="M6 4h4v16H6V4zm8 0h4v16h-4V4z" />
+                              </svg>
+                            ) : (
+                              <svg className="w-6 h-6" fill="currentColor" viewBox="0 0 24 24">
+                                <path d="M8 5v14l11-7z" />
+                              </svg>
+                            )}
+                          </button>
+                          <div className="flex-1 min-w-0">
+                            <p className="font-semibold text-slate-800 mb-1">{section.name}</p>
+                            {section.cue && <p className="text-sm text-slate-600 mb-1">{section.cue}</p>}
+                            <p className="text-xs text-slate-500">
+                              {section.audioFile ? '🎵 ' + section.audioFile : '⚠️ 未上傳音檔'}
+                            </p>
+                            {(isPlaying || isPausedState) && (
+                              <div className="mt-3 flex items-center gap-2">
+                                <div className="flex-1 h-2 bg-slate-200 rounded-full overflow-hidden">
+                                  <div 
+                                    className={`h-full ${isPlaying ? 'bg-blue-600' : 'bg-yellow-600'}`}
+                                    style={{ width: duration > 0 ? `${(currentTime / duration) * 100}%` : '0%', transition: 'width 0.1s' }} 
+                                  />
+                                </div>
+                                <span className="text-xs text-slate-600 font-medium w-12 text-right">
+                                  {Math.floor(currentTime)}s / {Math.floor(duration)}s
+                                </span>
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            ))}
+          </div>
+
+          {currentProject.chapters.length === 0 && (
+            <div className="text-center text-slate-400 py-12 bg-white rounded-lg shadow-sm">
+              <p>還沒有任何章節或段落</p>
+              <button 
+                onClick={() => setCurrentPage('settings')}
+                className="mt-4 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition"
+              >
+                前往編輯
+              </button>
+            </div>
+          )}
+
+          {/* 音量控制 */}
+          <div className="fixed bottom-0 left-0 right-0 bg-white border-t border-slate-200 p-4 shadow-lg">
+            <div className="max-w-5xl mx-auto flex items-center gap-4">
+              <svg className="w-5 h-5 text-slate-600 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.536 8.464a5 5 0 010 7.072m2.828-9.9a9 9 0 010 12.728M5.586 15H4a1 1 0 01-1-1v-4a1 1 0 011-1h1.586l4.707-4.707C10.923 3.663 12 4.109 12 5v14c0 .891-1.077 1.337-1.707.707L5.586 15z" />
+              </svg>
+              <input
+                type="range"
+                min="0"
+                max="1"
+                step="0.01"
+                value={volume}
+                onChange={(e) => {
+                  const newVol = parseFloat(e.target.value);
+                  setVolume(newVol);
+                  if (audioRef.current) audioRef.current.volume = newVol;
+                }}
+                className="flex-1 h-2 bg-slate-200 rounded-lg appearance-none cursor-pointer"
+                style={{
+                  background: `linear-gradient(to right, #3b82f6 0%, #3b82f6 ${volume * 100}%, #e2e8f0 ${volume * 100}%, #e2e8f0 100%)`
+                }}
+              />
+              <span className="text-sm text-slate-600 font-medium w-12 text-right">{Math.round(volume * 100)}%</span>
+            </div>
+          </div>
+
+          {/* 底部留白避免被音量控制遮住 */}
+          <div className="h-20"></div>
+        </div>
+
+        <audio
+          ref={audioRef}
+          onEnded={() => {
+            setCurrentPlayingId(null);
+            setIsPaused(false);
+          }}
+          onTimeUpdate={(e) => setCurrentTime(e.target.currentTime)}
+          onLoadedMetadata={(e) => setDuration(e.target.duration)}
+        />
+      </div>
+    );
+  }
+
+  return null;
+}
+
+const root = ReactDOM.createRoot(document.getElementById('root'));
+root.render(<TheaterApp />);
+console.log('App rendered');
+</script>
+</body>
+</html>

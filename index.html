@@ -163,6 +163,11 @@ function TheaterApp() {
     };
     setProjects([...projects, newProject]);
   };
+const deleteProject = (projectId) => {
+  if (window.confirm('確定要刪除此專案嗎?')) {
+    setProjects(projects.filter(p => p.id !== projectId));
+  }
+};
 
   const moveChapter = (index, direction) => {
     const chapters = [...currentProject.chapters];
